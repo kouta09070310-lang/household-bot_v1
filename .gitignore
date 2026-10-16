@@ -1,0 +1,7 @@
+.wrangler/
+node_modules/
+.dev.vars
+# 自分のアカウント ID・KV の ID を含むので公開しない（見本は wrangler.example.toml）
+wrangler.toml
+# 自分の実際の予定（KV に入れる初期データ）
+seed/

@@ -1,0 +1,14 @@
+# これをコピーして wrangler.toml を作る（wrangler.toml は .gitignore 済み）
+#   cp wrangler.example.toml wrangler.toml
+#   npx wrangler kv namespace create TASKS_KV   → 表示された id を下に貼る
+name = "household-bot"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "TASKS_KV"
+id = "<KV_NAMESPACE_ID>"
+
+# 毎時0分（UTC）に起動し、コード側で日本時間に直して通知内容を決める
+[triggers]
+crons = ["0 * * * *"]
