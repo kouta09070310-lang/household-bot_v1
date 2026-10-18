@@ -1,7 +1,9 @@
 // 月次レポート：LINE用の Flex Message、Webページ（HTML）、CSV を作る
 import { summarize, yen } from "./expense.js";
+import { fmtHours } from "./shift.js";
 
 const GREEN = "#06C755"; // LINE のブランドカラーに寄せたアクセント
+const RED = "#D64545"; // 予算超過
 const MAX_ROWS = 6; // LINE のカードに出すカテゴリ数（残りは「その他」にまとめる）
 
 function daysInMonth(ym) {
@@ -27,12 +29,60 @@ function topCategories(categories) {
 }
 
 // ---------- LINE（Flex Message） ----------
-export function buildFlex(ym, entries, jst, url) {
+// バイト欄：合計／予算、使った割合のバー、区分ごとの時間と金額
+function workFlex(w) {
+  const s = w.summary;
+  const over = s.remaining < 0;
+  const ratio = s.budget > 0 ? Math.min(100, Math.round((s.total / s.budget) * 100)) : 100;
+  return [
+    { type: "separator", margin: "xl" },
+    { type: "text", text: "バイト", size: "sm", color: "#888888", margin: "lg" },
+    {
+      type: "box",
+      layout: "baseline",
+      contents: [
+        { type: "text", text: `¥${yen(s.total)}`, size: "xl", weight: "bold", flex: 0 },
+        { type: "text", text: ` ／ 予算 ¥${yen(s.budget)}`, size: "xs", color: "#888888", margin: "sm" },
+      ],
+    },
+    {
+      type: "box",
+      layout: "vertical",
+      margin: "sm",
+      height: "6px",
+      cornerRadius: "3px",
+      backgroundColor: "#E6E9E7",
+      contents: [
+        { type: "box", layout: "vertical", contents: [], height: "6px", cornerRadius: "3px", backgroundColor: over ? RED : GREEN, width: `${Math.max(2, ratio)}%` },
+      ],
+    },
+    {
+      type: "text",
+      text: over ? `⚠️ 予算を ¥${yen(-s.remaining)} 超過` : `残り ¥${yen(s.remaining)}・${fmtHours(s.hours)}働いた`,
+      size: "xs",
+      color: over ? RED : "#888888",
+      margin: "sm",
+    },
+    ...s.kinds.map((k) => ({
+      type: "box",
+      layout: "horizontal",
+      margin: "sm",
+      contents: [
+        { type: "text", text: k.name, size: "sm", flex: 2 },
+        { type: "text", text: fmtHours(k.hours), size: "sm", color: "#888888", align: "end", flex: 3 },
+        { type: "text", text: `¥${yen(k.amount)}`, size: "sm", align: "end", flex: 3 },
+      ],
+    })),
+  ];
+}
+
+// work: バイトの集計 { entries, summary }（記録がなければ null）
+export function buildFlex(ym, entries, jst, url, work = null) {
   const s = summarize(entries);
-  if (s.count === 0) return `${monthLabel(ym)}の支出記録はまだないよ\n「支出 800 食費」みたいに送ってね`;
+  if (s.count === 0 && !work) return `${monthLabel(ym)}の記録はまだないよ\n「支出 800 食費」「バイト」で記録できるよ`;
 
   const avg = Math.round(s.total / elapsedDays(ym, jst));
-  const max = s.categories[0].amount;
+  const max = s.categories[0]?.amount || 1;
   const rows = topCategories(s.categories).map((c) => ({
     type: "box",
     layout: "vertical",
@@ -70,7 +120,8 @@ export function buildFlex(ym, entries, jst, url) {
         { type: "text", text: `¥${yen(s.total)}`, size: "xxl", weight: "bold" },
         { type: "text", text: `${s.count}件・1日平均 ¥${yen(avg)}`, size: "xs", color: "#888888" },
         { type: "separator", margin: "lg" },
-        ...rows,
+        ...(rows.length ? rows : [{ type: "text", text: "支出の記録はまだないよ", size: "sm", color: "#888888", margin: "md" }]),
+        ...(work ? workFlex(work) : []),
       ],
     },
   };
@@ -89,17 +140,20 @@ export function buildFlex(ym, entries, jst, url) {
       ],
     };
   }
-  return { type: "flex", altText: `${monthLabel(ym)}の支出 ¥${yen(s.total)}`, contents: bubble };
+  return { type: "flex", altText: `${monthLabel(ym)}の支出 ¥${yen(s.total)}${work ? `・バイト ¥${yen(work.summary.total)}` : ""}`, contents: bubble };
 }
 
 // ---------- CSV ----------
 const csvCell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
 
-export function renderCsv(entries) {
-  const lines = [["日付", "金額", "カテゴリ", "メモ"].map(csvCell).join(",")];
-  for (const e of [...entries].sort((a, b) => a.ts - b.ts)) {
-    lines.push([e.date, e.amount, e.category, e.memo].map(csvCell).join(","));
-  }
+// 支出とバイトを1つの表に。「種別」列で見分ける（バイトはカテゴリ欄に区分名）
+export function renderCsv(entries, shifts = []) {
+  const rows = [
+    ...entries.map((e) => ({ ts: e.ts, cells: ["支出", e.date, e.amount, e.category, e.memo, "", ""] })),
+    ...shifts.map((e) => ({ ts: e.ts, cells: ["バイト", e.date, e.amount, e.name, "", e.hours, e.rate] })),
+  ].sort((a, b) => a.cells[1].localeCompare(b.cells[1]) || a.ts - b.ts);
+  const lines = [["種別", "日付", "金額", "カテゴリ・区分", "メモ", "時間", "時給"].map(csvCell).join(",")];
+  for (const r of rows) lines.push(r.cells.map(csvCell).join(","));
   // 先頭の BOM で Excel でも文字化けしない
   return "﻿" + lines.join("\r\n") + "\r\n";
 }
@@ -108,7 +162,28 @@ export function renderCsv(entries) {
 const esc = (s) =>
   String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-export function renderHtml(ym, entries, jst, csvUrl) {
+function workHtml(w) {
+  const s = w.summary;
+  const over = s.remaining < 0;
+  const ratio = s.budget > 0 ? Math.min(100, (s.total / s.budget) * 100) : 100;
+  const kinds = s.kinds
+    .map((k) => `<tr><td>${esc(k.name)}</td><td class="num">${fmtHours(k.hours)}</td><td class="num">¥${yen(k.amount)}</td></tr>`)
+    .join("");
+  const rows = [...w.entries]
+    .sort((a, b) => b.date.localeCompare(a.date) || b.ts - a.ts)
+    .map(
+      (e) => `<tr><td>${esc(e.date.slice(5).replace("-", "/"))}</td><td>${esc(e.name)}</td><td class="num">${fmtHours(e.hours)}</td><td class="num">¥${yen(e.amount)}</td></tr>`
+    )
+    .join("");
+  return `<section><h2>バイト</h2>
+<div class="cat-head"><span><b class="big">¥${yen(s.total)}</b> ／ 予算 ¥${yen(s.budget)}</span><span class="num">${fmtHours(s.hours)}</span></div>
+<div class="track"><div class="bar${over ? " over" : ""}" style="width:${Math.max(1, ratio)}%"></div></div>
+<p class="meta${over ? " warn" : ""}" style="margin:6px 0 12px">${over ? `予算を ¥${yen(-s.remaining)} 超えています` : `残り ¥${yen(s.remaining)}`}</p>
+<table>${kinds}</table>
+<h2 style="margin-top:16px">バイトの明細</h2><table>${rows}</table></section>`;
+}
+
+export function renderHtml(ym, entries, jst, csvUrl, work = null) {
   const s = summarize(entries);
   const avg = s.count ? Math.round(s.total / elapsedDays(ym, jst)) : 0;
   const maxCat = s.categories[0]?.amount || 1;
@@ -165,14 +240,16 @@ table{width:100%;border-collapse:collapse;font-size:14px}td{padding:8px 4px;bord
 td:first-child{color:var(--sub);width:52px}
 .btn{display:inline-block;background:var(--accent);color:#fff;text-decoration:none;font-weight:600;padding:10px 16px;border-radius:8px;font-size:14px}
 .empty{color:var(--sub)}
+.big{font-size:20px}.bar.over{background:#d64545}.warn{color:#d64545}
 </style></head><body><main>
 <h1>${monthLabel(ym)}の支出</h1>
 <div class="total num" style="text-align:left">¥${yen(s.total)}</div>
 <p class="meta">${s.count}件・1日平均 ¥${yen(avg)}</p>
-${s.count === 0 ? '<section class="empty">この月の記録はまだありません。</section>' : `
+${s.count === 0 ? '<section class="empty">この月の支出の記録はまだありません。</section>' : `
 <section><h2>カテゴリ別</h2>${catRows}</section>
 <section><h2>日別</h2><div class="days">${dayBars}</div></section>
 <section><h2>明細</h2><table>${rows}</table></section>`}
+${work ? workHtml(work) : ""}
 <a class="btn" href="${esc(csvUrl)}">CSVをダウンロード</a>
 </main></body></html>`;
 }

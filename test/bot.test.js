@@ -7,6 +7,7 @@ import { parseExpense } from "../src/expense.js";
 import { jstNow } from "../src/time.js";
 import { reportToken } from "../src/line.js";
 import { validateSchedule, DEFAULT_SCHEDULE } from "../src/schedule.js";
+import { DEFAULT_JOB, parseHours, parseWorkDate, validateJob, remainingHoursLines } from "../src/shift.js";
 
 const SECRET = "test-channel-secret";
 
@@ -158,7 +159,7 @@ test("レポートページ：合言葉なしは404、ありならHTMLとCSV", a
   const bytes = new Uint8Array(await csvRes.arrayBuffer());
   assert.deepEqual([...bytes.slice(0, 3)], [0xef, 0xbb, 0xbf]); // BOM（.text() だと消えるのでバイトで確認）
   const csv = new TextDecoder().decode(bytes);
-  assert.ok(csv.startsWith("\"日付\",\"金額\""));
+  assert.ok(csv.startsWith("\"種別\",\"日付\",\"金額\""));
   assert.match(csv, /"800","食費","""ランチ"""/);
 });
 
@@ -261,20 +262,20 @@ test("予定設定：本人だけにリンク、期限切れ・不正トーク�
   const next = structuredClone(DEFAULT_SCHEDULE);
   next.weekly[0] = { ...next.weekly[0], name: "歯ブラシ交換</script>", days: [2] };
   const post = (body) => worker.fetch(new Request(`https://x/settings?t=${t}`, { method: "POST", body: JSON.stringify(body) }), env);
-  assert.equal((await post(next)).status, 200);
+  assert.equal((await post({ schedule: next, job: DEFAULT_JOB })).status, 200);
   assert.match((await say("予定")).text, /歯ブラシ交換<\/script>\n　火曜/);
   const html = await (await worker.fetch(new Request(link), env)).text();
   assert.ok(!html.includes("交換</script>"));
 
   // 不正な値は 400 で、保存されない
-  const res = await post({ weekly: [{ name: "", days: [1], eve: true }], morning: {} });
+  const res = await post({ schedule: { weekly: [{ name: "", days: [1], eve: true }], morning: {} }, job: DEFAULT_JOB });
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /名前が空/);
 
   // 期限切れ（KV のキーが消えた状態）
   env.TASKS_KV._m.delete(`settings_token_${t}`);
   assert.equal((await worker.fetch(new Request(link), env)).status, 404);
-  assert.equal((await post(next)).status, 404);
+  assert.equal((await post({ schedule: next, job: DEFAULT_JOB })).status, 404);
 });
 
 test("朝のタスクも予定から読む", async () => {
@@ -289,4 +290,127 @@ test("朝のタスクも予定から読む", async () => {
 test("MY_USER_ID に空白や改行が混ざっていても本人と判定する", async () => {
   env.MY_USER_ID = " U1\n";
   assert.match((await say("予定設定")).text, /settings\?t=/);
+});
+
+// ---- バイトカウンター（見本の区分 A・B=¥1,000、C=¥1,100、予算 ¥50,000） ----
+test("バイト：時間と勤務日の読み取り", () => {
+  assert.equal(parseHours("5"), 5);
+  assert.equal(parseHours("5.5"), 5.5);
+  assert.equal(parseHours("5:30"), 5.5);
+  assert.equal(parseHours("5時間30分"), 5.5);
+  assert.equal(parseHours("6h"), 6);
+  assert.equal(parseHours("90分"), 1.5);
+  assert.equal(parseHours("0"), null);
+  assert.equal(parseHours("25"), null);
+  assert.equal(parseHours("5:75"), null);
+  assert.equal(parseHours("abc"), null);
+  assert.equal(parseWorkDate(undefined, "2026-11-02"), "2026-11-02");
+  assert.equal(parseWorkDate("昨日", "2026-11-01"), "2026-10-31");
+  assert.equal(parseWorkDate("10/31", "2026-11-02"), "2026-10-31");
+  assert.equal(parseWorkDate("12/31", "2027-01-05"), "2026-12-31"); // 年をまたぐ
+  assert.equal(parseWorkDate("11/05", "2026-11-02"), null); // 未来は不可
+  assert.equal(parseWorkDate("2/30", "2026-11-02"), null);
+});
+
+test("バイト：残り時間は時給ごとに分単位で切り捨て", () => {
+  assert.deepEqual(remainingHoursLines(DEFAULT_JOB, 45000), ["区分A・区分B（¥1,000）なら 45時間", "区分C（¥1,100）なら 40時間54分"]);
+  assert.deepEqual(remainingHoursLines(DEFAULT_JOB, -100), ["区分A・区分B（¥1,000）なら 0時間", "区分C（¥1,100）なら 0時間"]);
+});
+
+test("バイト：区分をボタンで選んで時間を送ると記録し、残りを返す", async () => {
+  const menu = await say("バイト");
+  assert.match(menu.text, /予算 ¥50,000/);
+  assert.deepEqual(menu.quickReply.items.map((i) => i.action.text), ["バイト 区分A", "バイト 区分B", "バイト 区分C"]);
+
+  const ask = await say("バイト 区分A");
+  assert.match(ask.text, /何時間/);
+  assert.equal(ask.quickReply.items[0].action.text, "3");
+
+  const done = (await say("5")).text;
+  assert.match(done, /区分A 5時間（¥5,000）/);
+  assert.match(done, /残り ¥45,000/);
+  assert.match(done, /区分C（¥1,100）なら 40時間54分/);
+
+  // 記録したら待ち状態は解除。数字だけ送っても記録しない
+  assert.match((await say("5")).text, /使い方/);
+});
+
+test("バイト：1行入力・全角・前日分・時間待ちの期限切れ", async () => {
+  const r = (await say("バイト 区分C ５：３０ 昨日")).text;
+  assert.match(r, /区分C 5時間30分（¥6,050）/);
+  const y = addDaysStr(jstNow().date, -1);
+  const stored = JSON.parse(env.TASKS_KV._m.get(`shift_${y.slice(0, 7)}`));
+  assert.equal(stored[0].date, y);
+  assert.equal(stored[0].rate, 1100); // 記録時点の時給を保存
+
+  assert.match((await say("バイト 区分Z")).text, /登録されていない/);
+  assert.match((await say("バイト 区分A abc")).text, /時間は/);
+  assert.match((await say("バイト 区分A 5 12/40")).text, /日付は/);
+
+  await say("バイト 区分B");
+  env.TASKS_KV._m.delete("shift_pending"); // 10分経って消えた状態
+  assert.match((await say("4")).text, /使い方/);
+});
+
+test("バイト：予算を超えたら警告。月ごとの上書きが優先される", async () => {
+  const ym = jstNow().ym;
+  env.TASKS_KV._m.set("job_settings", JSON.stringify({ ...DEFAULT_JOB, monthly: { [ym]: 8000 } }));
+  assert.match((await say("バイト 区分A 5")).text, /予算 ¥8,000\n残り ¥3,000/);
+  assert.match((await say("バイト 区分A 5")).text, /⚠️ 予算を ¥2,000 超えています/);
+});
+
+test("取消：支出とバイトを入力の新しい順に取り消す", async () => {
+  await say("支出 800 食費");
+  await say("バイト 区分A 3");
+  assert.match((await say("取消")).text, /バイトを取り消したよ.*区分A 3時間/);
+  assert.match((await say("取り消し")).text, /支出を取り消したよ.*¥800/);
+  assert.match((await say("取消")).text, /取り消せる記録がない/);
+  assert.equal(JSON.parse(env.TASKS_KV._m.get(`shift_${jstNow().ym}`)).length, 0);
+});
+
+test("月次レポート：Flex・HTML・CSV にバイトが入る", async () => {
+  await say("支出 1200 食費");
+  await say("バイト 区分B 4");
+  const flex = await say("今月");
+  assert.match(flex.altText, /バイト ¥4,000/);
+  const texts = JSON.stringify(flex.contents.body);
+  assert.match(texts, /バイト/);
+  assert.match(texts, /残り ¥46,000/);
+
+  const ym = jstNow().ym;
+  const t = await reportToken(SECRET, ym);
+  const html = await (await worker.fetch(new Request(`https://x/report/${ym}?t=${t}`), env)).text();
+  assert.match(html, /バイトの明細/);
+  const csv = new TextDecoder().decode(await (await worker.fetch(new Request(`https://x/report/${ym}.csv?t=${t}`), env)).arrayBuffer());
+  assert.match(csv, /"支出","[\d-]+","1200","食費"/);
+  assert.match(csv, /"バイト","[\d-]+","4000","区分B","","4","1000"/);
+
+  // 支出がなくてもバイトだけでレポートを出す
+  env.TASKS_KV._m.delete(`exp_${ym}`);
+  const only = await say("今月");
+  assert.equal(only.type, "flex");
+  assert.match(JSON.stringify(only.contents.body), /支出の記録はまだない/);
+});
+
+test("バイト設定の検証と保存", async () => {
+  assert.throws(() => validateJob({ ...DEFAULT_JOB, kinds: [] }), /1〜5個/);
+  assert.throws(() => validateJob({ ...DEFAULT_JOB, kinds: [{ name: "区分 A", rate: 1000 }] }), /空白なし/);
+  assert.throws(() => validateJob({ ...DEFAULT_JOB, kinds: [{ name: "A", rate: 1000 }, { name: "A", rate: 1100 }] }), /重複/);
+  assert.throws(() => validateJob({ ...DEFAULT_JOB, kinds: [{ name: "A", rate: 0 }] }), /時給/);
+  assert.throws(() => validateJob({ ...DEFAULT_JOB, monthly: { "2026-13": 1 } }), /正しくありません/);
+  assert.deepEqual(validateJob({ kinds: [{ name: "A", rate: "1200" }], budget: "75000", monthly: { "2026-11": "70000" } }).monthly, { "2026-11": 70000 });
+
+  // 設定ページから保存 → 区分名が変わり、ボタンにも反映
+  const t = new URL((await say("予定設定")).text.match(/https:\S+/)[0]).searchParams.get("t");
+  const job = { kinds: [{ id: "x", name: "早番", rate: 1200 }], budget: 75000, monthly: {} };
+  const res = await worker.fetch(new Request(`https://x/settings?t=${t}`, { method: "POST", body: JSON.stringify({ schedule: DEFAULT_SCHEDULE, job }) }), env);
+  assert.equal(res.status, 200);
+  const menu = await say("バイト");
+  assert.equal(menu.quickReply.items[0].action.text, "バイト 早番");
+  assert.match(menu.text, /予算 ¥75,000/);
+
+  // バイトの設定が不正なら、予定も保存しない
+  const bad = await worker.fetch(new Request(`https://x/settings?t=${t}`, { method: "POST", body: JSON.stringify({ schedule: { ...DEFAULT_SCHEDULE, morning: { 1: "変更" } }, job: { ...job, budget: -1 } }) }), env);
+  assert.equal(bad.status, 400);
+  assert.notEqual(JSON.parse(env.TASKS_KV._m.get("schedule") || "{}").morning?.[1], "変更");
 });

@@ -1,5 +1,5 @@
 // 支出記録：1件ずつ月ごとのキー（exp_YYYY-MM）に保存する
-import { addDays, prevYm, dowOf } from "./time.js";
+import { addDays, dowOf } from "./time.js";
 
 const key = (ym) => `exp_${ym}`;
 
@@ -35,26 +35,26 @@ export async function weekTotal(env, jst) {
   return total;
 }
 
+// 記録して、返事の文と取り消し用の { ym, id } を返す
 export async function recordExpense(env, entry, jst) {
   const list = await getMonth(env, jst.ym);
-  list.push({ ...entry, date: jst.date, ts: Date.now() });
+  const id = crypto.randomUUID();
+  list.push({ ...entry, id, date: jst.date, ts: Date.now() });
   await putMonth(env, jst.ym, list);
   const month = list.reduce((s, e) => s + e.amount, 0);
   const week = await weekTotal(env, jst);
   const label = entry.memo ? `${entry.category}・${entry.memo}` : entry.category;
-  return `💰 記録したよ！ ¥${yen(entry.amount)}（${label}）\n今週：¥${yen(week)}\n今月：¥${yen(month)}\n\n間違えたら「取消」で消せるよ`;
+  const message = `💰 記録したよ！ ¥${yen(entry.amount)}（${label}）\n今週：¥${yen(week)}\n今月：¥${yen(month)}\n\n間違えたら「取消」で消せるよ`;
+  return { message, ym: jst.ym, id };
 }
 
-// 直前の1件を取り消す
-export async function undoLast(env, jst) {
-  for (const ym of [jst.ym, prevYm(jst.ym)]) {
-    const list = await getMonth(env, ym);
-    if (list.length === 0) continue;
-    const last = list.pop();
-    await putMonth(env, ym, list);
-    return `↩️ 取り消したよ：${last.date.slice(5).replace("-", "/")} ¥${yen(last.amount)}（${last.category}）`;
-  }
-  return "取り消せる記録がないよ";
+// 取り消し用：ID を指定して1件消す（消したものを返す）
+export async function removeExpense(env, ym, id) {
+  const list = await getMonth(env, ym);
+  const hit = list.find((e) => e.id === id);
+  if (!hit) return null;
+  await putMonth(env, ym, list.filter((e) => e.id !== id));
+  return hit;
 }
 
 // 集計：合計・件数・カテゴリ別・日別

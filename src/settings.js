@@ -1,4 +1,4 @@
-// 予定の設定ページ：LINE で「予定設定」と送った本人にだけ、30分有効のリンクを発行する
+// 予定とバイトの設定ページ：LINE で「予定設定」と送った本人にだけ、30分有効のリンクを発行する
 import { DOW_JA } from "./schedule.js";
 
 export const LINK_TTL = 30 * 60; // 秒
@@ -19,11 +19,11 @@ export async function isValidSettingsToken(env, t) {
 // JSON を <script> に埋め込むときに </script> で閉じられないようにする
 const embed = (obj) => JSON.stringify(obj).replace(/</g, "\\u003c");
 
-export function renderSettings(schedule, token) {
+export function renderSettings(schedule, job, token) {
   return `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex"><meta name="referrer" content="no-referrer">
-<title>予定の設定</title>
+<title>予定とバイトの設定</title>
 <style>
 :root{--bg:#f6f7f6;--card:#fff;--ink:#1d2320;--sub:#6b736f;--line:#e3e6e4;--accent:#06C755;--danger:#d64545;--field:#fff}
 @media (prefers-color-scheme:dark){:root{--bg:#121513;--card:#1b1f1d;--ink:#e8ece9;--sub:#9aa39e;--line:#2b302d;--field:#232825}}
@@ -50,21 +50,38 @@ button.add{width:100%;border-style:dashed}
 .bar div{max-width:640px;margin:0 auto;display:flex;gap:12px;align-items:center}
 .save{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;padding:10px 20px}
 #msg{font-size:13px;color:var(--sub)}#msg.err{color:var(--danger)}
+input[type=number],input[type=month]{font:inherit;color:inherit;background:var(--field);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+input.yen{width:100px;text-align:right}input[type=month]{width:136px}input.kname{flex:1;min-width:0}
+.unit{font-size:13px;color:var(--sub)}.hint{font-size:12px;color:var(--sub);margin:4px 0 0}
 </style></head><body><main>
-<h1>予定の設定</h1>
+<h1>予定とバイトの設定</h1>
 <p class="lead">このリンクは発行から30分有効です。保存するとすぐ通知に反映されます。</p>
 <h2>毎週の予定</h2>
 <div id="weekly"></div>
 <button class="add" id="add" type="button">＋ 予定を追加</button>
 <h2>平日朝6時の小さなタスク</h2>
 <div class="card" id="morning"></div>
+<h2>バイトの区分と時給</h2>
+<div class="card"><div id="kinds"></div><p class="hint">区分名は「バイト 区分名 5」と送るときに使うので、空白なしで付けてください。</p></div>
+<button class="add" id="addKind" type="button">＋ 区分を追加</button>
+<h2>バイトの月の予算（上限）</h2>
+<div class="card">
+<div class="row"><label class="t" for="budget">毎月の予算</label><input type="number" class="yen" id="budget" min="0" step="1000" inputmode="numeric"><span class="unit">円</span></div>
+<div id="monthly"></div>
+<p class="hint">特定の月だけ予算を変えたいときは、下で月ごとに上書きできます。</p>
+</div>
+<button class="add" id="addMonth" type="button">＋ 月ごとの予算を追加</button>
 </main>
 <div class="bar"><div><button class="save" id="save" type="button">保存</button><span id="msg" role="status"></span></div></div>
-<script id="data" type="application/json">${embed(schedule)}</script>
+<script id="data" type="application/json">${embed({ schedule, job })}</script>
 <script>
 const TOKEN = ${embed(token)};
 const DOW = ${embed(DOW_JA)};
-const state = JSON.parse(document.getElementById("data").textContent);
+const data = JSON.parse(document.getElementById("data").textContent);
+const state = data.schedule;
+const job = data.job;
+// 月ごとの上書きは画面上は配列で扱い、保存時にオブジェクトへ戻す
+let months = Object.entries(job.monthly || {}).map(([ym, amount]) => ({ ym, amount }));
 const $ = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) k in el ? (el[k] = v) : el.setAttribute(k, v);
@@ -98,12 +115,38 @@ function card(w, i) {
       $("input", { type: "text", className: "memo", value: w.memo, placeholder: "当日のひとこと（任意）", oninput: bind("memo") })));
 }
 
+function kindRow(k, i) {
+  const del = $("button", { type: "button", className: "del" }, "削除");
+  del.onclick = () => { job.kinds.splice(i, 1); draw(); };
+  return $("div", { className: "row" },
+    $("input", { type: "text", className: "kname", value: k.name, placeholder: "例：区分A", oninput: (e) => { k.name = e.target.value; }, "aria-label": "区分名" }),
+    $("input", { type: "number", className: "yen", value: k.rate, min: 1, step: 10, inputMode: "numeric", oninput: (e) => { k.rate = e.target.value; }, "aria-label": "時給" }),
+    $("span", { className: "unit" }, "円/時"), del);
+}
+
+function monthRow(m, i) {
+  const del = $("button", { type: "button", className: "del" }, "削除");
+  del.onclick = () => { months.splice(i, 1); draw(); };
+  return $("div", { className: "row" },
+    $("input", { type: "month", value: m.ym, oninput: (e) => { m.ym = e.target.value; }, "aria-label": "月" }),
+    $("input", { type: "number", className: "yen", value: m.amount, min: 0, step: 1000, inputMode: "numeric", oninput: (e) => { m.amount = e.target.value; }, "aria-label": "その月の予算" }),
+    $("span", { className: "unit" }, "円"), del);
+}
+
 function draw() {
+  document.getElementById("kinds").replaceChildren(...job.kinds.map(kindRow));
+  document.getElementById("addKind").hidden = job.kinds.length >= 5;
+  document.getElementById("budget").value = job.budget;
+  document.getElementById("monthly").replaceChildren(...months.map(monthRow));
   document.getElementById("weekly").replaceChildren(...state.weekly.map(card));
   document.getElementById("morning").replaceChildren(...[1, 2, 3, 4, 5].map((d) =>
     $("div", { className: "row" }, $("label", { className: "t" }, DOW[d] + "曜"),
       $("input", { type: "text", className: "memo", value: state.morning[d] || "", oninput: (e) => { state.morning[d] = e.target.value; } }))));
 }
+
+document.getElementById("budget").oninput = (e) => { job.budget = e.target.value; };
+document.getElementById("addKind").onclick = () => { job.kinds.push({ name: "", rate: "" }); draw(); };
+document.getElementById("addMonth").onclick = () => { months.push({ ym: "", amount: job.budget }); draw(); };
 
 document.getElementById("add").onclick = () => {
   state.weekly.push({ emoji: "🔔", name: "", days: [], eve: true, eveMemo: "", hour: null, memo: "" });
@@ -115,13 +158,25 @@ document.getElementById("save").onclick = async () => {
   const msg = document.getElementById("msg");
   msg.className = ""; msg.textContent = "保存中…";
   try {
-    const res = await fetch("/settings?t=" + TOKEN, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(state) });
+    const res = await fetch("/settings?t=" + TOKEN, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ schedule: state, job: { ...job, monthly: toMonthly() } }) });
     const out = await res.json();
     if (!res.ok) throw new Error(out.error || "保存できませんでした");
-    Object.assign(state, out.schedule); draw();
+    Object.assign(state, out.schedule);
+    Object.assign(job, out.job);
+    months = Object.entries(job.monthly).map(([ym, amount]) => ({ ym, amount }));
+    draw();
     msg.textContent = "保存しました ✓";
   } catch (e) { msg.className = "err"; msg.textContent = e.message; }
 };
+function toMonthly() {
+  const o = {};
+  for (const m of months) {
+    if (!m.ym) throw new Error("月ごとの予算の「月」を選んでください");
+    if (m.ym in o) throw new Error(m.ym + " が2回指定されています");
+    o[m.ym] = Number(m.amount);
+  }
+  return o;
+}
 draw();
 </script></body></html>`;
 }

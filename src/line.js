@@ -8,6 +8,21 @@ function toMessages(msg) {
   return list.map((m) => (typeof m === "string" ? { type: "text", text: m } : m));
 }
 
+// クイックリプライ（入力欄の上に出るボタン）付きのテキスト
+// choices: [{ label, text }]。押すと text がそのままユーザーの発言として送られる
+export function withQuickReply(text, choices) {
+  return {
+    type: "text",
+    text,
+    quickReply: {
+      items: choices.slice(0, 13).map((c) => ({
+        type: "action",
+        action: { type: "message", label: c.label.slice(0, 20), text: c.text },
+      })),
+    },
+  };
+}
+
 async function post(env, path, payload) {
   const res = await fetch(`${API}/${path}`, {
     method: "POST",
