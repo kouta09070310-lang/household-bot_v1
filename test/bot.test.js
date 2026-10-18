@@ -398,16 +398,16 @@ test("バイト設定の検証と保存", async () => {
   assert.throws(() => validateJob({ ...DEFAULT_JOB, kinds: [{ name: "A", rate: 1000 }, { name: "A", rate: 1100 }] }), /重複/);
   assert.throws(() => validateJob({ ...DEFAULT_JOB, kinds: [{ name: "A", rate: 0 }] }), /時給/);
   assert.throws(() => validateJob({ ...DEFAULT_JOB, monthly: { "2026-13": 1 } }), /正しくありません/);
-  assert.deepEqual(validateJob({ kinds: [{ name: "A", rate: "1200" }], budget: "75000", monthly: { "2026-11": "70000" } }).monthly, { "2026-11": 70000 });
+  assert.deepEqual(validateJob({ kinds: [{ name: "A", rate: "1200" }], budget: "60000", monthly: { "2026-12": "40000" } }).monthly, { "2026-12": 40000 });
 
   // 設定ページから保存 → 区分名が変わり、ボタンにも反映
   const t = new URL((await say("予定設定")).text.match(/https:\S+/)[0]).searchParams.get("t");
-  const job = { kinds: [{ id: "x", name: "早番", rate: 1200 }], budget: 75000, monthly: {} };
+  const job = { kinds: [{ id: "x", name: "早番", rate: 1200 }], budget: 60000, monthly: {} };
   const res = await worker.fetch(new Request(`https://x/settings?t=${t}`, { method: "POST", body: JSON.stringify({ schedule: DEFAULT_SCHEDULE, job }) }), env);
   assert.equal(res.status, 200);
   const menu = await say("バイト");
   assert.equal(menu.quickReply.items[0].action.text, "バイト 早番");
-  assert.match(menu.text, /予算 ¥75,000/);
+  assert.match(menu.text, /予算 ¥60,000/);
 
   // バイトの設定が不正なら、予定も保存しない
   const bad = await worker.fetch(new Request(`https://x/settings?t=${t}`, { method: "POST", body: JSON.stringify({ schedule: { ...DEFAULT_SCHEDULE, morning: { 1: "変更" } }, job: { ...job, budget: -1 } }) }), env);

@@ -16,7 +16,7 @@ export const DEFAULT_JOB = {
     { id: "c", name: "区分C", rate: 1100 },
   ],
   budget: 50000, // 毎月の上限（円）
-  monthly: {}, // 月ごとの上書き { "2026-11": 75000 }
+  monthly: {}, // 月ごとの上書き { "2026-12": 60000 }
 };
 
 const LIMITS = { kinds: 5, name: 10, rate: 100000, budget: 10000000, months: 24 };
